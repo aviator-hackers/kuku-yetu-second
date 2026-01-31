@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 // Security middleware
 app.use(helmet());
 app.use(cors({
-    origin: ['https://your-frontend.netlify.app', 'http://localhost:3000'],
+    origin: ['https://kuku-yetu.netlify.app', 'http://localhost:3000'],
     credentials: true
 }));
 app.use(express.json());
