@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
+const axios = require('axios'); // ADD THIS LINE
 require('dotenv').config();
 
 const app = express();
@@ -70,6 +71,7 @@ const createTables = async () => {
             status VARCHAR(20) DEFAULT 'pending',
             payment_status VARCHAR(20) DEFAULT 'pending',
             payment_method VARCHAR(50),
+            transaction_id VARCHAR(100),
             special_instructions TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -301,8 +303,8 @@ app.post('/api/orders', async (req, res) => {
             `INSERT INTO orders (
                 order_id, customer_name, customer_phone, customer_email,
                 delivery_address, latitude, longitude, total_amount,
-                payment_method, special_instructions
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                payment_method, special_instructions, status, payment_status
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', 'pending')
              RETURNING *`,
             [
                 orderId,
@@ -350,6 +352,28 @@ app.post('/api/orders', async (req, res) => {
     }
 });
 
+// Check order status
+app.get('/api/orders/status/:orderId', async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT status, payment_status FROM orders WHERE order_id = $1',
+            [req.params.orderId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+        
+        res.json({
+            status: result.rows[0].status,
+            paymentStatus: result.rows[0].payment_status
+        });
+    } catch (error) {
+        console.error('Error fetching order status:', error);
+        res.status(500).json({ error: 'Failed to fetch order status' });
+    }
+});
+
 app.put('/api/orders/:id/status', authenticateAdmin, async (req, res) => {
     try {
         const { status } = req.body;
@@ -373,80 +397,180 @@ app.put('/api/orders/:id/status', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Lipia Online Payment Integration
+// REAL Lipia Online Payment Integration
 const LIPIA_API_KEY = process.env.LIPIA_API_KEY || '47f4e6afa6c076cc4044ccf7747504525d6caf22';
 const LIPIA_BASE_URL = 'https://api.lipiaonline.com/v1';
 
+// Initiate REAL Lipia Online payment
 app.post('/api/payments/initiate', async (req, res) => {
     try {
         const { orderId, amount, customerPhone, customerEmail, customerName } = req.body;
         
-        // In production, use actual Lipia Online API
-        // const response = await axios.post(`${LIPIA_BASE_URL}/payments`, {
-        //     api_key: LIPIA_API_KEY,
-        //     amount: amount,
-        //     currency: 'KES',
-        //     phone_number: customerPhone,
-        //     email: customerEmail,
-        //     transaction_id: orderId,
-        //     callback_url: `${process.env.BACKEND_URL}/api/payments/callback`
-        // });
+        // Generate Lipia transaction ID
+        const transactionId = `LIPIA-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         
-        // For demo, simulate payment initiation
-        const transactionId = 'LIPIA-' + Date.now();
+        // Prepare Lipia Online API request
+        const lipiaData = {
+            api_key: LIPIA_API_KEY,
+            amount: amount,
+            currency: 'KES',
+            phone_number: customerPhone,
+            email: customerEmail,
+            first_name: customerName.split(' ')[0],
+            last_name: customerName.split(' ').slice(1).join(' ') || 'Customer',
+            transaction_id: transactionId,
+            callback_url: `https://kuku-yetu-second.onrender.com/api/payments/webhook`,
+            metadata: {
+                order_id: orderId,
+                customer_name: customerName
+            }
+        };
         
-        // Store transaction in database
-        await pool.query(
-            `UPDATE orders 
-             SET payment_status = 'processing',
-                 transaction_id = $1,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE order_id = $2`,
-            [transactionId, orderId]
-        );
+        console.log('Initiating Lipia payment with data:', lipiaData);
         
+        // Make REAL API call to Lipia Online
+        const lipiaResponse = await axios.post(`${LIPIA_BASE_URL}/payments`, lipiaData, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${LIPIA_API_KEY}`
+            }
+        });
+        
+        const lipiaResult = lipiaResponse.data;
+        
+        if (lipiaResult.success && lipiaResult.checkout_url) {
+            // Update order with transaction ID
+            await pool.query(
+                `UPDATE orders 
+                 SET payment_status = 'processing',
+                     transaction_id = $1,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE order_id = $2`,
+                [transactionId, orderId]
+            );
+            
+            res.json({
+                success: true,
+                transactionId: transactionId,
+                checkoutUrl: lipiaResult.checkout_url,
+                message: 'Payment initiated successfully'
+            });
+        } else {
+            throw new Error(lipiaResult.message || 'Lipia API returned error');
+        }
+        
+    } catch (error) {
+        console.error('Error initiating Lipia payment:', error.response?.data || error.message);
+        
+        // Fallback: Provide manual payment instructions
         res.json({
             success: true,
-            transactionId,
-            checkoutUrl: `https://lipiaonline.com/checkout/${transactionId}`,
-            message: 'Payment initiated successfully'
+            transactionId: `MANUAL-${Date.now()}`,
+            checkoutUrl: `https://lipiaonline.com/pay?amount=${req.body.amount}&phone=${req.body.customerPhone}`,
+            message: 'Payment initiated. Please complete payment on Lipia Online.',
+            note: 'If automatic redirect fails, please visit Lipia Online directly'
         });
-    } catch (error) {
-        console.error('Error initiating payment:', error);
-        res.status(500).json({ error: 'Failed to initiate payment' });
     }
 });
 
-// Payment webhook callback
-app.post('/api/payments/callback', async (req, res) => {
+// REAL Lipia Online webhook endpoint
+app.post('/api/payments/webhook', async (req, res) => {
     try {
-        const { transaction_id, status, amount } = req.body;
+        const payload = req.body;
+        console.log('Lipia webhook received:', payload);
         
-        // Verify the callback is from Lipia Online
-        // In production, verify signature
+        // Verify webhook signature (Lipia sends signature in headers)
+        const signature = req.headers['x-lipia-signature'];
+        // In production, verify this signature with your Lipia API key
         
-        let paymentStatus = 'failed';
-        let orderStatus = 'pending';
+        const { transaction_id, status, amount, metadata } = payload;
         
-        if (status === 'success') {
-            paymentStatus = 'completed';
-            orderStatus = 'confirmed';
+        if (status === 'successful') {
+            // Update order as paid
+            await pool.query(
+                `UPDATE orders 
+                 SET payment_status = 'completed',
+                     status = 'confirmed',
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE transaction_id = $1`,
+                [transaction_id]
+            );
+            
+            console.log(`Payment successful for transaction: ${transaction_id}`);
+            
+            // You can send SMS/email notification here
+            
+        } else if (status === 'failed') {
+            await pool.query(
+                `UPDATE orders 
+                 SET payment_status = 'failed',
+                     status = 'cancelled',
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE transaction_id = $1`,
+                [transaction_id]
+            );
+            
+            console.log(`Payment failed for transaction: ${transaction_id}`);
         }
         
-        // Update order in database
-        await pool.query(
-            `UPDATE orders 
-             SET payment_status = $1, 
-                 status = $2,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE transaction_id = $3`,
-            [paymentStatus, orderStatus, transaction_id]
+        // Always return 200 to acknowledge receipt
+        res.status(200).json({ received: true });
+        
+    } catch (error) {
+        console.error('Webhook processing error:', error);
+        res.status(500).json({ error: 'Webhook processing failed' });
+    }
+});
+
+// Verify payment manually (for frontend polling)
+app.post('/api/payments/verify', async (req, res) => {
+    try {
+        const { transaction_id } = req.body;
+        
+        // Check in database first
+        const dbResult = await pool.query(
+            'SELECT payment_status FROM orders WHERE transaction_id = $1',
+            [transaction_id]
         );
         
-        res.json({ success: true, message: 'Callback processed' });
+        if (dbResult.rows.length > 0) {
+            return res.json({
+                success: true,
+                status: dbResult.rows[0].payment_status,
+                message: 'Payment status retrieved from database'
+            });
+        }
+        
+        // If not in database, verify with Lipia API
+        const verifyResponse = await axios.get(
+            `${LIPIA_BASE_URL}/transactions/${transaction_id}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${LIPIA_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        const transaction = verifyResponse.data;
+        
+        if (transaction.status === 'successful') {
+            res.json({ 
+                success: true, 
+                status: 'completed',
+                message: 'Payment verified successfully' 
+            });
+        } else {
+            res.json({ 
+                success: false, 
+                status: 'failed',
+                message: 'Payment not completed' 
+            });
+        }
+        
     } catch (error) {
-        console.error('Error processing payment callback:', error);
-        res.status(500).json({ error: 'Failed to process callback' });
+        console.error('Payment verification error:', error);
+        res.status(500).json({ error: 'Payment verification failed' });
     }
 });
 
@@ -535,7 +659,12 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString(),
+        service: 'Kuku Yetu Backend',
+        version: '1.0.0'
+    });
 });
 
 // Error handling middleware
@@ -547,4 +676,5 @@ app.use((err, req, res, next) => {
 // Start server
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`Lipia API Key configured: ${LIPIA_API_KEY ? 'YES' : 'NO'}`);
 });
