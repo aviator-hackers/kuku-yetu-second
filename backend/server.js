@@ -3,7 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
-const axios = require('axios'); // ADD THIS LINE
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
@@ -103,6 +103,16 @@ const createTables = async () => {
     try {
         await pool.query(queries);
         console.log('Tables created or already exist');
+        
+        // Create default admin user if doesn't exist
+        await pool.query(
+            `INSERT INTO admin_users (email, password_hash) 
+             VALUES ($1, $2) 
+             ON CONFLICT (email) DO NOTHING`,
+            ['admin@kukuyetu.co.ke', 'Admin@2024!']
+        );
+        console.log('Admin user checked/created');
+        
     } catch (error) {
         console.error('Error creating tables:', error);
     }
@@ -138,6 +148,16 @@ const authenticateAdmin = async (req, res, next) => {
 };
 
 // API Routes
+
+// Health check endpoint (should be first)
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString(),
+        service: 'Kuku Yetu Backend',
+        version: '1.0.0'
+    });
+});
 
 // Products
 app.get('/api/products', async (req, res) => {
@@ -374,16 +394,17 @@ app.get('/api/orders/status/:orderId', async (req, res) => {
     }
 });
 
-app.put('/api/orders/:id/status', authenticateAdmin, async (req, res) => {
+// Update order status by ORDER ID (not database ID)
+app.put('/api/orders/status/:orderId', authenticateAdmin, async (req, res) => {
     try {
         const { status } = req.body;
         
         const result = await pool.query(
             `UPDATE orders 
              SET status = $1, updated_at = CURRENT_TIMESTAMP
-             WHERE id = $2
+             WHERE order_id = $2
              RETURNING *`,
-            [status, req.params.id]
+            [status, req.params.orderId]
         );
         
         if (result.rows.length === 0) {
@@ -462,13 +483,13 @@ app.post('/api/payments/initiate', async (req, res) => {
     } catch (error) {
         console.error('Error initiating Lipia payment:', error.response?.data || error.message);
         
-        // Fallback: Provide manual payment instructions
+        // Fallback: Create demo payment link
         res.json({
             success: true,
-            transactionId: `MANUAL-${Date.now()}`,
-            checkoutUrl: `https://lipiaonline.com/pay?amount=${req.body.amount}&phone=${req.body.customerPhone}`,
-            message: 'Payment initiated. Please complete payment on Lipia Online.',
-            note: 'If automatic redirect fails, please visit Lipia Online directly'
+            transactionId: `DEMO-${Date.now()}`,
+            checkoutUrl: `https://lipiaonline.com/demo-checkout?order=${req.body.orderId}`,
+            message: 'Demo payment initiated',
+            note: 'This is a demo payment. In production, real Lipia payment would be processed.'
         });
     }
 });
@@ -613,6 +634,22 @@ app.post('/api/admin/login', async (req, res) => {
     }
 });
 
+// Admin verify endpoint - MUST BE AFTER authenticateAdmin is defined!
+app.get('/api/admin/verify', authenticateAdmin, async (req, res) => {
+    try {
+        res.json({ 
+            success: true, 
+            admin: {
+                id: req.admin.id,
+                email: req.admin.email
+            }
+        });
+    } catch (error) {
+        console.error('Admin verification error:', error);
+        res.status(500).json({ error: 'Verification failed' });
+    }
+});
+
 // Dashboard statistics
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
     try {
@@ -657,16 +694,6 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        timestamp: new Date().toISOString(),
-        service: 'Kuku Yetu Backend',
-        version: '1.0.0'
-    });
-});
-
 // Error handling middleware
 app.use((err, req, res, next) => {
     console.error(err.stack);
@@ -677,4 +704,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`Lipia API Key configured: ${LIPIA_API_KEY ? 'YES' : 'NO'}`);
+    console.log(`Admin email: ${process.env.ADMIN_EMAIL || 'admin@kukuyetu.co.ke'}`);
 });
