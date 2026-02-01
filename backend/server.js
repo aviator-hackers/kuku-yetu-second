@@ -706,7 +706,7 @@ app.post('/api/payments/initiate', async (req, res) => {
             first_name: customerName?.split(' ')[0] || 'Customer',
             last_name: customerName?.split(' ').slice(1).join(' ') || '',
             transaction_id: transactionId,
-            callback_url: `${req.protocol}://${req.get('host')}/api/payments/webhook`,
+            callback_url: `https://${req.get('host')}/api/payments/webhook`,
             metadata: {
                 order_id: orderId,
                 customer_name: customerName
@@ -905,7 +905,7 @@ app.post('/api/payments/verify', async (req, res) => {
     }
 });
 
-// Notification System
+// ========== NOTIFICATION SYSTEM ENDPOINTS ==========
 
 // Send notification (Admin only)
 app.post('/api/notifications/send', authenticateAdmin, async (req, res) => {
@@ -973,7 +973,7 @@ app.post('/api/notifications/send', authenticateAdmin, async (req, res) => {
 app.get('/api/notifications/customer/:phone', async (req, res) => {
     try {
         const { phone } = req.params;
-        const { limit = 20 } = req.query;
+        const { limit = 10 } = req.query;
         
         const result = await pool.query(
             `SELECT n.*, o.customer_name, o.status as order_status
@@ -989,6 +989,25 @@ app.get('/api/notifications/customer/:phone', async (req, res) => {
     } catch (error) {
         console.error('Error fetching notifications:', error);
         res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+});
+
+// Get unread notification count for a customer
+app.get('/api/notifications/customer/:phone/unread-count', async (req, res) => {
+    try {
+        const { phone } = req.params;
+        
+        const result = await pool.query(
+            `SELECT COUNT(*) as count
+             FROM notifications
+             WHERE customer_phone = $1 AND is_read = false`,
+            [phone]
+        );
+        
+        res.json({ count: parseInt(result.rows[0].count) });
+    } catch (error) {
+        console.error('Error fetching unread count:', error);
+        res.status(500).json({ error: 'Failed to fetch unread count' });
     }
 });
 
@@ -1017,24 +1036,7 @@ app.put('/api/notifications/:id/read', async (req, res) => {
     }
 });
 
-// Get unread notification count
-app.get('/api/notifications/customer/:phone/unread-count', async (req, res) => {
-    try {
-        const { phone } = req.params;
-        
-        const result = await pool.query(
-            `SELECT COUNT(*) as count
-             FROM notifications
-             WHERE customer_phone = $1 AND is_read = false`,
-            [phone]
-        );
-        
-        res.json({ count: parseInt(result.rows[0].count) });
-    } catch (error) {
-        console.error('Error fetching unread count:', error);
-        res.status(500).json({ error: 'Failed to fetch unread count' });
-    }
-});
+// ========== ADMIN AUTHENTICATION ==========
 
 // Admin authentication
 app.post('/api/admin/login', async (req, res) => {
@@ -1124,9 +1126,7 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
         
         // Today's orders
         const todayResult = await pool.query(
-            "SELECT COUNT(*) as today_orders, SUM(total_amount) as today_revenue 
-             FROM orders 
-             WHERE DATE(created_at) = CURRENT_DATE AND status != 'cancelled'"
+            "SELECT COUNT(*) as today_orders, SUM(total_amount) as today_revenue FROM orders WHERE DATE(created_at) = CURRENT_DATE AND status != 'cancelled'"
         );
         
         // Recent orders
@@ -1189,4 +1189,5 @@ app.listen(PORT, () => {
     console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔗 CORS enabled for: https://kuku-yetu.netlify.app`);
     console.log(`💰 Lipia API Key: ${LIPIA_API_KEY ? 'Configured' : 'Not configured (using demo mode)'}`);
+    console.log(`🔔 Notification system: Enabled`);
 });
